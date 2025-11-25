@@ -1,0 +1,108 @@
+# ============================
+# CONFIGURATION
+# ============================
+$WatchFolder = "D:\Inbound"
+$MoveTo      = "D:\Inbound\Ready"
+$LogFolder   = "D:\Inbound\Logs"
+
+# Create needed folders
+foreach ($folder in @($MoveTo, $LogFolder)) {
+    if (!(Test-Path $folder)) {
+        New-Item -ItemType Directory -Path $folder | Out-Null
+    }
+}
+
+# ============================
+# LOGGING FUNCTION
+# ============================
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Colour = "White"
+    )
+
+    $date = Get-Date -Format "yyyy-MM-dd"
+    $logFile = Join-Path $LogFolder "$date.log"
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $entry = "[$timestamp] $Message"
+
+    # Console output (colour-coded)
+    Write-Host $entry -ForegroundColor $Colour
+
+    # Log file output
+    Add-Content -Path $logFile -Value $entry
+}
+
+# ============================
+# EVENT HANDLER
+# ============================
+$Action = {
+    param($source, $eventArgs)
+
+    $file = $eventArgs.FullPath
+    $name = $eventArgs.Name
+
+    # Ignore directories
+    if ((Get-Item $file).PSIsContainer) { return }
+
+    # Ignore TMP files
+    if ($name.ToLower().EndsWith(".tmp")) {
+        Write-Log "Ignoring TMP file: $name" "Yellow"
+        return
+    }
+
+    # Check if locked
+    try {
+        $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+        $stream.Close()
+    }
+    catch {
+        Write-Log "File locked, waiting: $name" "Yellow"
+        return
+    }
+
+    # Destination path
+    $destination = Join-Path $MoveTo $name
+
+    # Move file
+    try {
+        Move-Item -Path $file -Destination $destination -Force
+        Write-Log "Moved file: $name → $MoveTo" "Green"
+    }
+    catch {
+        Write-Log "ERROR moving $name : $_" "Red"
+    }
+}
+
+# ============================
+# FILESYSTEM WATCHER
+# ============================
+$Watcher = New-Object System.IO.FileSystemWatcher
+$Watcher.Path = $WatchFolder
+$Watcher.Filter = "*.*"
+$Watcher.IncludeSubdirectories = $false
+$Watcher.EnableRaisingEvents = $true
+$Watcher.NotifyFilter = [System.IO.NotifyFilters]'FileName, LastWrite, Size'
+
+# Register events
+$Created = Register-ObjectEvent $Watcher Created -Action $Action
+$Changed = Register-ObjectEvent $Watcher Changed -Action $Action
+$Renamed = Register-ObjectEvent $Watcher Renamed -Action $Action
+
+Write-Log "===== WATCHER STARTED =====" "Cyan"
+Write-Log "Watching: $WatchFolder" "Cyan"
+Write-Log "Output:   $MoveTo" "Cyan"
+Write-Log "======================================" "Cyan"
+
+# ============================
+# KEEP SCRIPT ALIVE FOREVER
+# ============================
+try {
+    while ($true) { Start-Sleep 1 }
+}
+catch {
+    Write-Log "Unexpected error in main loop: $_" "Red"
+    # Automatically restart main loop to keep script alive
+    while ($true) { Start-Sleep 1 }
+}
