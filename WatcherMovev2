@@ -1,0 +1,132 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Media
+
+# ============================
+# CONFIGURATION
+# ============================
+$WatchFolder = "D:\Inbound"
+$MoveTo      = "D:\Inbound\Ready"
+$LogFolder   = "D:\Inbound\Logs"
+
+# Create needed folders
+foreach ($folder in @($MoveTo, $LogFolder)) {
+    if (!(Test-Path $folder)) {
+        New-Item -ItemType Directory -Path $folder | Out-Null
+    }
+}
+
+# ============================
+# LOGGING + ALERT FUNCTIONS
+# ============================
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Colour = "White"
+    )
+
+    $date = Get-Date -Format "yyyy-MM-dd"
+    $logFile = Join-Path $LogFolder "$date.log"
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $entry = "[$timestamp] $Message"
+
+    Write-Host $entry -ForegroundColor $Colour
+    Add-Content -Path $logFile -Value $entry
+}
+
+# Popup popup
+function Show-Popup {
+    param([string]$Text, [string]$Title)
+
+    [System.Windows.Forms.MessageBox]::Show($Text, $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
+}
+
+# Sound notifications
+function Play-OKSound {
+    [System.Media.SystemSounds]::Asterisk.Play()
+}
+
+function Play-ErrorSound {
+    [System.Media.SystemSounds]::Hand.Play()
+}
+
+# ============================
+# EVENT HANDLER
+# ============================
+$Action = {
+    param($source, $eventArgs)
+
+    $file = $eventArgs.FullPath
+    $name = $eventArgs.Name
+
+    # Ignore directories
+    if ((Get-Item $file).PSIsContainer) { return }
+
+    # Ignore TMP
+    if ($name.ToLower().EndsWith(".tmp")) {
+        Write-Log "Ignoring TMP file: $name" "Yellow"
+        return
+    }
+
+    # Check if file is still locked
+    try {
+        $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+        $stream.Close()
+    }
+    catch {
+        Write-Log "File locked, waiting: $name" "Yellow"
+        return
+    }
+
+    # Destination path
+    $destination = Join-Path $MoveTo $name
+
+    # Move file
+    try {
+        Move-Item -Path $file -Destination $destination -Force
+        Write-Log "Moved file: $name → $MoveTo" "Green"
+        Play-OKSound         # 🔊 success sound
+    }
+    catch {
+        Write-Log "ERROR moving $name : $_" "Red"
+        Play-ErrorSound      # 🔊 error sound
+        Show-Popup "Error moving file:`n$name`n`nSee log for details." "File Move Error"  # 🔔 popup
+    }
+}
+
+# ============================
+# FILESYSTEM WATCHER
+# ============================
+$Watcher = New-Object System.IO.FileSystemWatcher
+$Watcher.Path = $WatchFolder
+$Watcher.Filter = "*.*"
+$Watcher.IncludeSubdirectories = $false
+$Watcher.EnableRaisingEvents = $true
+$Watcher.NotifyFilter = [System.IO.NotifyFilters]'FileName, LastWrite, Size'
+
+# Register events
+$Created = Register-ObjectEvent $Watcher Created -Action $Action
+$Changed = Register-ObjectEvent $Watcher Changed -Action $Action
+$Renamed = Register-ObjectEvent $Watcher Renamed -Action $Action
+
+Write-Log "===== WATCHER STARTED =====" "Cyan"
+Write-Log "Watching: $WatchFolder" "Cyan"
+Write-Log "Output:   $MoveTo" "Cyan"
+Write-Log "======================================" "Cyan"
+
+# ============================
+# RUN FOREVER
+# ============================
+try {
+    while ($true) { Start-Sleep 1 }
+}
+catch {
+    Write-Log "Unexpected main-loop error: $_" "Red"
+    Play-ErrorSound
+    Show-Popup "Watcher main loop encountered an error. Restarting..." "Watcher Error"
+
+    while ($true) { Start-Sleep 1 }  # auto-recover
+}
